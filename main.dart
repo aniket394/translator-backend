@@ -1,18 +1,83 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
-import 'translate_service.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'dart:io';
-import 'cameraUI.dart';
-
+import 'dart:io' 
+    if (dart.library.html) 'unsupported_io_stub.dart'; // <-- ignore dart:io on Web
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart';
- // <-- for kIsWeb
+import 'package:flutter/foundation.dart'; // <-- for kIsWeb
 
 void main() {
   runApp(MyApp());
 }
+
+// ==========================================================
+//                        TRANSLATOR SERVICE
+// ==========================================================
+
+class TranslatorService {
+  static String baseUrl = "https://translator-backend-z3q4.onrender.com"; // change to your Render URL for mobile
+
+  Future<String> translateText(String text, String targetLang) async {
+    try {
+      final response = await http.post(
+        Uri.parse("$baseUrl/translate"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"text": text, "target_lang": targetLang}),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data["translated_text"] ?? "No translation found";
+      } else {
+        return "Error: ${response.statusCode}";
+      }
+    } catch (e) {
+      return "Error: $e";
+    }
+  }
+
+  // Only mobile/desktop: image/file translation
+  Future<Map<String, dynamic>> translateFile(dynamic file, String targetLang) async {
+    try {
+      if (kIsWeb) {
+        // Web: file is bytes
+        var request = http.MultipartRequest(
+          'POST',
+          Uri.parse("$baseUrl/file_translate"),
+        );
+        request.fields['target_lang'] = targetLang;
+        request.files.add(http.MultipartFile.fromBytes(
+          'file',
+          file.bytes,
+          filename: file.name,
+        ));
+
+        var response = await request.send();
+        var responseData = await response.stream.bytesToString();
+        return json.decode(responseData);
+      } else {
+        // Mobile/Desktop: file is File
+        var request = http.MultipartRequest(
+          'POST',
+          Uri.parse("$baseUrl/file_translate"),
+        );
+        request.fields['target_lang'] = targetLang;
+        request.files.add(await http.MultipartFile.fromPath('file', file.path));
+
+        var response = await request.send();
+        var responseData = await response.stream.bytesToString();
+        return json.decode(responseData);
+      }
+    } catch (e) {
+      return {"error": "Connection failed: $e"};
+    }
+  }
+}
+
+// ==========================================================
+//                       FLUTTER APP
+// ==========================================================
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -89,49 +154,14 @@ class _HomeContainerState extends State<HomeContainer> {
   int _selectedBottomIndex = 1;
 
   List<Widget> get screens => [
-    const FilesScreen(), // Updated for file picker + translation
-    const SplashscreenUI(),
-    const CameraScreenUI(),
-  ];
+        const FilesScreen(),
+        const SplashscreenUI(),
+        const CameraScreenUI(),
+      ];
 
   @override
   void initState() {
     super.initState();
-    if (!kIsWeb) {
-      _autoDiscoverServer();
-    }
-  }
-
-  /// Automatically find the Python server on the network
-  Future<void> _autoDiscoverServer() async {
-    try {
-      print("📡 Searching for Python server...");
-      RawDatagramSocket.bind(InternetAddress.anyIPv4, 0).then((socket) {
-        socket.broadcastEnabled = true;
-        // Send discovery packet
-        List<int> data = utf8.encode("DISCOVER_SERVER");
-        socket.send(data, InternetAddress("255.255.255.255"), 5005);
-
-        socket.listen((RawSocketEvent e) {
-          if (e == RawSocketEvent.read) {
-            Datagram? d = socket.receive();
-            if (d != null) {
-              String message = utf8.decode(d.data).trim();
-              if (message.startsWith("SERVER_IP:")) {
-                String ip = message.split(":")[1];
-                setState(() {
-                  TranslatorService.baseUrl = "http://$ip:5000";
-                });
-                print("✅ Auto-connected to Server: $ip");
-                socket.close();
-              }
-            }
-          }
-        });
-      });
-    } catch (e) {
-      print("Auto-discovery failed: $e");
-    }
   }
 
   @override
@@ -164,7 +194,7 @@ class _HomeContainerState extends State<HomeContainer> {
 }
 
 // ==========================================================
-//                       FILES SCREEN (Web + Android/iOS)
+//                       FILES SCREEN
 // ==========================================================
 
 class FilesScreen extends StatefulWidget {
@@ -198,7 +228,7 @@ class _FilesScreenState extends State<FilesScreen> {
     "Spanish": "es",
   };
 
-  String toLang = "Marathi"; // default translation language
+  String toLang = "Marathi";
 
   Future<void> pickAndTranslateFile() async {
     setState(() {
@@ -207,9 +237,9 @@ class _FilesScreenState extends State<FilesScreen> {
 
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       type: FileType.any,
-      withData: kIsWeb, // important for Web
+      withData: kIsWeb,
     );
-    if (result == null) return; // user cancelled
+    if (result == null) return;
 
     setState(() {
       loading = true;
@@ -217,46 +247,16 @@ class _FilesScreenState extends State<FilesScreen> {
 
     try {
       final target = langCode[toLang] ?? "hi";
+      final translator = TranslatorService();
 
-      var request = http.MultipartRequest(
-        'POST',
-        Uri.parse("${TranslatorService.baseUrl}/file_translate"),
-      );
+      var response = await translator.translateFile(
+          kIsWeb ? result.files.single : File(result.files.single.path!), target);
 
-      if (kIsWeb) {
-        // Web: use bytes
-        final bytes = result.files.single.bytes!;
-        request.files.add(
-          http.MultipartFile.fromBytes(
-            "file",
-            bytes,
-            filename: result.files.single.name,
-          ),
-        );
-      } else {
-        // Android/iOS: use File path
-        final file = File(result.files.single.path!);
-        request.files.add(await http.MultipartFile.fromPath("file", file.path));
-      }
-
-      request.fields['target_lang'] = target;
-
-      var response = await request.send();
-
-      if (response.statusCode == 200) {
-        var respStr = await response.stream.bytesToString();
-        var data = jsonDecode(respStr);
-        setState(() {
-          output = data['translated_text'] ?? "No translation found";
-          fileName = result.files.single.name;
-          loading = false;
-        });
-      } else {
-        setState(() {
-          output = "Error: ${response.statusCode}";
-          loading = false;
-        });
-      }
+      setState(() {
+        output = response['translated_text'] ?? response['error'] ?? "Error";
+        fileName = result.files.single.name;
+        loading = false;
+      });
     } catch (e) {
       setState(() {
         output = "Error: $e";
@@ -278,22 +278,11 @@ class _FilesScreenState extends State<FilesScreen> {
           children: [
             ElevatedButton.icon(
               icon: Icon(Icons.attach_file),
-              label: Text(
-                "Pick & Translate File",
-                style: TextStyle(fontSize: 18),
-              ),
+              label: Text("Pick & Translate File"),
               onPressed: pickAndTranslateFile,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.teal,
-                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              ),
             ),
             SizedBox(height: 20),
-            if (fileName.isNotEmpty)
-              Text(
-                "Selected File: $fileName",
-                style: TextStyle(color: Colors.white),
-              ),
+            if (fileName.isNotEmpty) Text("Selected File: $fileName", style: TextStyle(color: Colors.white)),
             SizedBox(height: 20),
             if (loading) CircularProgressIndicator(),
             if (output.isNotEmpty)
@@ -306,7 +295,6 @@ class _FilesScreenState extends State<FilesScreen> {
                 child: Text(output, style: TextStyle(color: Colors.white)),
               ),
             SizedBox(height: 20),
-            // Language selector
             DropdownButton<String>(
               value: toLang,
               dropdownColor: bg,
@@ -315,9 +303,7 @@ class _FilesScreenState extends State<FilesScreen> {
                 if (value != null) setState(() => toLang = value);
               },
               items: langCode.keys
-                  .map(
-                    (lang) => DropdownMenuItem(value: lang, child: Text(lang)),
-                  )
+                  .map((lang) => DropdownMenuItem(value: lang, child: Text(lang)))
                   .toList(),
             ),
           ],
@@ -328,11 +314,11 @@ class _FilesScreenState extends State<FilesScreen> {
 }
 
 // ==========================================================
-//                      CAMERA SCREEN
+//                       CAMERA SCREEN
 // ==========================================================
 
-class CameraScreen extends StatelessWidget {
-  const CameraScreen({super.key});
+class CameraScreenUI extends StatelessWidget {
+  const CameraScreenUI({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -363,41 +349,14 @@ class _SplashscreenUIState extends State<SplashscreenUI> {
   final TranslatorService translator = TranslatorService();
 
   final List<String> languages = [
-    "English",
-    "Hindi",
-    "Marathi",
-    "Tamil",
-    "Telugu",
-    "Kannada",
-    "Gujarati",
-    "Punjabi",
-    "Malayalam",
-    "Bengali",
-    "Odia",
-    "Assamese",
-    "Urdu",
-    "Chinese",
-    "Japanese",
-    "Spanish",
+    "English","Hindi","Marathi","Tamil","Telugu","Kannada","Gujarati","Punjabi",
+    "Malayalam","Bengali","Odia","Assamese","Urdu","Chinese","Japanese","Spanish",
   ];
 
   final Map<String, String> flags = {
-    "English": "🇬🇧",
-    "Hindi": "🇮🇳",
-    "Marathi": "🇮🇳",
-    "Tamil": "🇮🇳",
-    "Telugu": "🇮🇳",
-    "Kannada": "🇮🇳",
-    "Gujarati": "🇮🇳",
-    "Punjabi": "🇮🇳",
-    "Malayalam": "🇮🇳",
-    "Bengali": "🇮🇳",
-    "Odia": "🇮🇳",
-    "Assamese": "🇮🇳",
-    "Urdu": "🇵🇰",
-    "Chinese": "🇨🇳",
-    "Japanese": "🇯🇵",
-    "Spanish": "🇪🇸",
+    "English": "🇬🇧","Hindi": "🇮🇳","Marathi": "🇮🇳","Tamil": "🇮🇳","Telugu": "🇮🇳",
+    "Kannada": "🇮🇳","Gujarati": "🇮🇳","Punjabi": "🇮🇳","Malayalam": "🇮🇳","Bengali": "🇮🇳",
+    "Odia": "🇮🇳","Assamese": "🇮🇳","Urdu": "🇵🇰","Chinese": "🇨🇳","Japanese": "🇯🇵","Spanish": "🇪🇸",
   };
 
   String fromLang = "English";
@@ -406,23 +365,10 @@ class _SplashscreenUIState extends State<SplashscreenUI> {
   TextEditingController input = TextEditingController();
   String output = "";
 
-  Map<String, String> langCode = {
-    "English": "en",
-    "Hindi": "hi",
-    "Marathi": "mr",
-    "Tamil": "ta",
-    "Telugu": "te",
-    "Kannada": "kn",
-    "Gujarati": "gu",
-    "Punjabi": "pa",
-    "Malayalam": "ml",
-    "Bengali": "bn",
-    "Odia": "or",
-    "Assamese": "as",
-    "Urdu": "ur",
-    "Chinese": "zh",
-    "Japanese": "ja",
-    "Spanish": "es",
+  final Map<String, String> langCode = {
+    "English": "en","Hindi": "hi","Marathi": "mr","Tamil": "ta","Telugu": "te",
+    "Kannada": "kn","Gujarati": "gu","Punjabi": "pa","Malayalam": "ml","Bengali": "bn",
+    "Odia": "or","Assamese": "as","Urdu": "ur","Chinese": "zh","Japanese": "ja","Spanish": "es",
   };
 
   @override
@@ -465,22 +411,14 @@ class _SplashscreenUIState extends State<SplashscreenUI> {
                     return ListTile(
                       onTap: () {
                         setState(() {
-                          if (isFrom) {
-                            fromLang = lang;
-                          } else {
-                            toLang = lang;
-                          }
+                          if (isFrom) fromLang = lang;
+                          else toLang = lang;
                         });
                         Navigator.pop(context);
                       },
-                      leading: Text(
-                        flags[lang] ?? "🌐",
-                        style: TextStyle(fontSize: 20),
-                      ),
+                      leading: Text(flags[lang] ?? "🌐", style: TextStyle(fontSize: 20)),
                       title: Text(lang, style: TextStyle(color: Colors.white)),
-                      trailing: selected
-                          ? Icon(Icons.check, color: Colors.green)
-                          : null,
+                      trailing: selected ? Icon(Icons.check, color: Colors.green) : null,
                     );
                   },
                 ),
@@ -535,9 +473,7 @@ class _SplashscreenUIState extends State<SplashscreenUI> {
     });
 
     try {
-      final url = Uri.parse(
-        '${TranslatorService.baseUrl}/voice_translate?target_lang=$target',
-      );
+      final url = Uri.parse('${TranslatorService.baseUrl}/voice_translate?target_lang=$target');
       final response = await http.get(url);
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -565,10 +501,7 @@ class _SplashscreenUIState extends State<SplashscreenUI> {
         backgroundColor: bg,
         elevation: 0,
         centerTitle: true,
-        title: Text(
-          "Language Translator",
-          style: TextStyle(color: Colors.white),
-        ),
+        title: Text("Language Translator", style: TextStyle(color: Colors.white)),
       ),
       body: Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
@@ -576,12 +509,7 @@ class _SplashscreenUIState extends State<SplashscreenUI> {
           children: [
             Row(
               children: [
-                Expanded(
-                  child: _langPill(
-                    fromLang,
-                    () => _openLanguagePicker(isFrom: true),
-                  ),
-                ),
+                Expanded(child: _langPill(fromLang, () => _openLanguagePicker(isFrom: true))),
                 SizedBox(width: 12),
                 InkWell(
                   onTap: () {
@@ -593,29 +521,18 @@ class _SplashscreenUIState extends State<SplashscreenUI> {
                   },
                   child: Container(
                     padding: EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: card,
-                      shape: BoxShape.circle,
-                    ),
+                    decoration: BoxDecoration(color: card, shape: BoxShape.circle),
                     child: Icon(Icons.swap_horiz, color: Colors.white),
                   ),
                 ),
                 SizedBox(width: 12),
-                Expanded(
-                  child: _langPill(
-                    toLang,
-                    () => _openLanguagePicker(isFrom: false),
-                  ),
-                ),
+                Expanded(child: _langPill(toLang, () => _openLanguagePicker(isFrom: false))),
               ],
             ),
             SizedBox(height: 25),
             Container(
               width: double.infinity,
-              decoration: BoxDecoration(
-                color: panel,
-                borderRadius: BorderRadius.circular(14),
-              ),
+              decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(14)),
               padding: EdgeInsets.all(14),
               child: Column(
                 children: [
@@ -636,10 +553,7 @@ class _SplashscreenUIState extends State<SplashscreenUI> {
                   Row(
                     children: [
                       Container(
-                        decoration: BoxDecoration(
-                          color: card,
-                          shape: BoxShape.circle,
-                        ),
+                        decoration: BoxDecoration(color: card, shape: BoxShape.circle),
                         child: IconButton(
                           icon: Icon(Icons.mic, color: Colors.white),
                           onPressed: doVoiceTranslate,
@@ -650,9 +564,7 @@ class _SplashscreenUIState extends State<SplashscreenUI> {
                         onPressed: doTranslate,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.teal,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         ),
                         child: Text("Translate"),
                       ),
@@ -666,10 +578,7 @@ class _SplashscreenUIState extends State<SplashscreenUI> {
               Container(
                 width: double.infinity,
                 padding: EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: Color(0xff113033),
-                  borderRadius: BorderRadius.circular(12),
-                ),
+                decoration: BoxDecoration(color: Color(0xff113033), borderRadius: BorderRadius.circular(12)),
                 child: Text(output, style: TextStyle(color: Colors.white)),
               ),
           ],

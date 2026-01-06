@@ -4,7 +4,7 @@ import 'package:http/http.dart' as http;
 
 class TranslatorService {
   // Use localhost for Flutter Web
-  static String baseUrl = "http://127.0.0.1:5000";
+  static String baseUrl = "https://translator-backend-z3q4.onrender.com";
 
   Future<String> translateText(String text, String targetLang) async {
     try {
